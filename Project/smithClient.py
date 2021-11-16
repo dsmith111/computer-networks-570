@@ -155,7 +155,9 @@ def runServer(ip, port, targetIP, targetPort, type, message):
         print("Attempting to connect")
         try:
             s.bind((ip, int(port)))
+            print("Bound")
             s.connect((targetIP, int(targetPort)))
+            print("Connected")
             if type == "message":
                 msgBin = strToBin(message)
             else:
