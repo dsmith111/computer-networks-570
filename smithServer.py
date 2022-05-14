@@ -1,10 +1,6 @@
 import socket
 import random
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from matplotlib import style
-import time
 import argparse
 
 
@@ -13,36 +9,7 @@ def getArgs():
 
     parser.add_argument("ip")
     parser.add_argument("port")
-    parser.add_argument("targetIp")
-    parser.add_argument("targetPort")
-    parser.add_argument("type")
-    parser.add_argument("message")
-
     return parser.parse_args()
-
-
-def readImage(imagePath):
-    with open(imagePath, "rb") as jpg:
-
-        while True:
-            image = jpg.read()
-            break
-
-    return image
-
-
-def imageToBin(image):
-    stringPacket = [f"{packByte:08b}" for packByte in image]
-    return "".join(stringPacket)
-
-
-def strToBin(msg: str):
-    binRep = ""
-
-    for character in msg:
-        binRep += f"{(ord(character)):08b}"
-
-    return binRep
 
 
 def buildPacket(sync=0, ack=0, fin=0, seqNum=0, ackNum=0, payload=0, payloadSize=0, divisor="000000000"):
@@ -150,90 +117,112 @@ def checkCRC(binCode, divisor):
     return "".join([str(val) for val in payload[-(len(divisor) - 1):]])
 
 
-def runServer(ip, port, targetIP, targetPort, type, message):
+def runServer(ip, port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        print("Attempting to connect")
         try:
+            print("Looking for clients")
             s.bind((ip, int(port)))
-            print("Bound")
-            s.connect((targetIP, int(targetPort)))
-            print("Connected")
-            if type == "message":
-                msgBin = strToBin(message)
-            else:
-                msgBin = imageToBin(readImage(message))
-
-            # Define some packet info
-            seqNum = 0
-            ackNum = 0
-            divisor = '100000111'
-
-            print(f"Connected to {targetIP}:{targetPort}")
-
-            # Handshake
-            # - Send Sync Request
-            syncPacket = bytes(buildPacket(sync=1))
-            sent = s.send(syncPacket)
-
-            # - Receive Sync Ack
-            ackPacket = s.recv(2048)
-            flags, otherSeq, otherAck, otherPayload = separateData(ackPacket)
-            ackNum = otherAck
-            print("Server Acknowledged: ", otherAck)
-
-            # - Send Sync Ack
-            ackPacket = bytes(buildPacket(ack=1, ackNum=ackNum, seqNum=seqNum))
-            seqNum += 1
-            payloadSent = 0
-            sent = s.send(ackPacket)
-            cnt = 1
-
+            s.listen()
             while True:
+                cnt = 0
+                conn, adr = s.accept()
+                with conn:
+                    print(f"Connected to {adr}")
 
-                # Send Data
-                print("sending payload")
-                payloadSlice = msgBin[payloadSent: payloadSent + 1024]
-                if len(payloadSlice):
-                    payloadPiece = bytes(buildPacket(ackNum=ackNum, seqNum=seqNum, payloadSize=len(
-                        payloadSlice), payload=int(payloadSlice, base=2), divisor=divisor))
+                    seqNum = 0
+                    ackNum = 1
+                    otherDivisor = "100000111"
+                    totalPayload = ""
+
+                    # Receive Sync Request
+                    syncReq = conn.recv(2048)
+                    sync = int(f"{syncReq[0]:08b}"[6])
+
+                    if sync:
+                        print("Client wants to synchronize")
+                    else:
+                        conn.close()
+                        break
+
+                    # Accept Sync Request
+                    ack = buildPacket(
+                        sync=1, ack=1, ackNum=ackNum, seqNum=seqNum)
+                    seqNum += 1
+                    conn.send(bytes(ack))
+
+                    # Receive Sync Ack
+                    syncAck = int(f"{conn.recv(2048)[0]:08b}"[3])
+                    if (syncAck):
+                        print("Ready to receive data")
+
+                    else:
+                        conn.close()
+                        break
+
+                    while True:
+                        failRate = random.random()
+
+                        # Receive Data
+                        print("waiting for data")
+                        packet = conn.recv(2048)
+                        print("processing data")
+                        clFlags, clSeqNum, clAckNum, payloadPiece = separateData(
+                            packet)
+
+                        if failRate < 0.2:
+                            print("Random Packet Error")
+                            stringPacket = [
+                                f"{packByte:08b}" for packByte in packet]
+                            bit1 = int(stringPacket[-2])
+                            bit2 = int(stringPacket[-1])
+                            stringPacket[-1] = stringPacket[-1][:-2] + \
+                                str(bit1 ^ 1) + str(bit2 ^ 1)
+                            packet = [int("".join(listByte), base=2)
+                                      for listByte in stringPacket]
+
+                        fin = int(clFlags[-1])
+                        crcCheck = checkCRC(packet, otherDivisor)
+
+                        print(crcCheck)
+
+                        if fin:
+                            print("Client is finished sending data")
+                            conn.close()
+                            break
+
+                        if crcCheck == 0:
+                            ackNum += len(packet)
+                            totalPayload += payloadPiece
+
+                        else:
+                            print(crcCheck, len(payloadPiece),
+                                  len(otherDivisor))
+                            print(
+                                "".join([f"{packByte:08b}" for packByte in packet]))
+                            print("Erroneous data, try to request packet")
+
+                        # Send Acknowledgement
+                        print("ack", ackNum)
+                        ack = buildPacket(ack=1, ackNum=ackNum, seqNum=seqNum)
+                        conn.send(bytes(ack))
+
+                        print(f"cnt: {cnt} >>> {int(payloadPiece)}")
+                        cnt += 1
+
+                print("Displaying data")
+                if cnt >= 98 and cnt <= 110:
+                    print(decipherMessage(totalPayload))
+
+                elif len(totalPayload) < (2**15):
+                    print(decipherMessage(totalPayload))
+
                 else:
-                    payloadPiece = bytes(buildPacket(
-                        ackNum=ackNum, seqNum=seqNum, divisor=divisor))
+                    imgPayload = decipherImage(totalPayload)
 
-                ttr = time.monotonic()
-                sent = s.send(payloadPiece)
+                    with open('recImage.jpg', 'wb') as jpg:
+                        jpg.write(imgPayload)
 
-                # Wait for acknowledgement
-                print("waiting for ack")
-                resp = s.recv(2048)
-                ttr = time.monotonic() - ttr
-
-                flags, otherSeq, otherAck, otherPayload = separateData(resp)
-
-                if otherAck == seqNum + len(payloadPiece):
-                    print("Sequence Num", seqNum, "-->",
-                          seqNum + len(payloadPiece))
-                    seqNum += len(payloadPiece)
-                    payloadSent += 1024
-
-                else:
-                    print("Faulty checksum")
-                    print(checkCRC(payloadPiece, divisor))
-
-                if seqNum >= len(msgBin) + (98 * cnt) or cnt > 700:
-                    print("Finished sending data")
-                    s.send(bytes(buildPacket(fin=1, divisor=divisor)))
-                    s.close()
                     break
-
-                cnt += 1
-
-                # time.sleep(3)
-                lF = open("latency.txt", "a")
-                lF.write(f"{cnt},{ttr}\n")
-                lF.close()
-
-            s.close()
 
         except Exception as error:
             s.close()
@@ -242,7 +231,6 @@ def runServer(ip, port, targetIP, targetPort, type, message):
 
 if __name__ == "__main__":
     args = getArgs()
-    # Logs
-    latencyFile = open("latency.txt", "w").close()
-    runServer(args.ip, args.port, args.targetIp,
-              args.targetPort, args.type, args.message)
+    ip = "23.235.207.63"
+    port = 9997
+    runServer(ip, port)
